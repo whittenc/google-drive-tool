@@ -12,8 +12,9 @@ use Data::Dumper;
 use Encode;
 use JSON;
 use LWP::UserAgent;
-use MIME::Base64 qw(encode_base64);
+use MIME::Base64 qw(encode_base64 decode_base64);
 use URI::Escape qw(uri_escape);
+use File::Temp qw(tempfile);
 
 our $VERSION = '1.0.0';
 
@@ -22,6 +23,7 @@ my $DEFAULT_CREDENTIALS_DIR = '/data/cassens/lib/Google/.google_credentials';
 my $CLIENT_ID_FILE        = "client_id.txt";
 my $CLIENT_SECRET_FILE    = "client_secret.txt";
 my $REFRESH_TOKEN_FILE    = "refresh_token.txt";
+my $SERVICE_ACCOUNT_FILE  = "perl-drive-upload-56687a459f35.json";
 my $FOLDERS_CONFIG_FILE   = "folders.json";
 my $EMAIL_CONFIG_FILE     = "email_notifications.json";
 my $REDIRECT_URI          = 'http://localhost:9090/oauth/callback';
@@ -31,19 +33,29 @@ sub new {
     my ( $class, %args ) = @_;
 
     my $self = {
-        credentials_dir => $args{credentials_dir} || $DEFAULT_CREDENTIALS_DIR,
-        client_id       => undef,
-        client_secret   => undef,
-        refresh_token   => undef,
-        access_token    => undef,
-        ua              => LWP::UserAgent->new( timeout => 120 ),
-        json            => JSON->new->allow_nonref->pretty,
+        credentials_dir       => $args{credentials_dir} || $DEFAULT_CREDENTIALS_DIR,
+        service_account_file  => $args{service_account_file},
+        client_id             => undef,
+        client_secret         => undef,
+        refresh_token         => undef,
+        access_token          => undef,
+        # Service account fields
+        service_account_email => undef,
+        private_key           => undef,
+        use_service_account   => 0,
+        ua                    => LWP::UserAgent->new( timeout => 120 ),
+        json                  => JSON->new->allow_nonref->pretty,
     };
 
     bless $self, $class;
 
     mkdir $self->{credentials_dir} unless -d $self->{credentials_dir};
-    $self->_load_credentials();
+
+    # Try to load service account credentials first
+    $self->_load_service_account_credentials();
+
+    # Fall back to OAuth2 if service account not available
+    $self->_load_credentials() unless $self->{use_service_account};
 
     return $self;
 }
@@ -72,6 +84,41 @@ sub _load_credentials {
     $self->{client_id}     = $self->_read_config_file($client_id_path)     if -f $client_id_path;
     $self->{client_secret} = $self->_read_config_file($client_secret_path) if -f $client_secret_path;
     $self->{refresh_token} = $self->_read_config_file($refresh_token_path) if -f $refresh_token_path;
+}
+
+sub _load_service_account_credentials {
+    my ($self) = @_;
+
+    # Determine the service account file path
+    my $sa_file = $self->{service_account_file};
+
+    # If not provided, look for it in the project root directory
+    unless ($sa_file) {
+        # Get the project root (assuming lib/Google/Services.pm structure)
+        my $module_path = abs_path(__FILE__);
+        my $project_root = dirname(dirname(dirname($module_path)));
+        $sa_file = File::Spec->catfile($project_root, $SERVICE_ACCOUNT_FILE);
+    }
+
+    return unless -f $sa_file;
+
+    # Read and parse the service account JSON
+    my $content = eval { read_file($sa_file) };
+    return if $@;
+
+    my $sa_data = eval { $self->{json}->decode($content) };
+    return if $@ || !$sa_data;
+
+    # Verify it's a service account file
+    return unless $sa_data->{type} && $sa_data->{type} eq 'service_account';
+    return unless $sa_data->{private_key} && $sa_data->{client_email};
+
+    # Store service account credentials
+    $self->{service_account_email} = $sa_data->{client_email};
+    $self->{private_key} = $sa_data->{private_key};
+    $self->{use_service_account} = 1;
+
+    return 1;
 }
 
 sub _api_request {
@@ -125,10 +172,101 @@ sub _save_json_config {
     return 1;
 }
 
+sub _base64url_encode {
+    my ($data) = @_;
+    my $encoded = encode_base64($data, '');
+    $encoded =~ s/\+/-/g;
+    $encoded =~ s/\//_/g;
+    $encoded =~ s/=+$//;
+    return $encoded;
+}
+
+sub _create_jwt {
+    my ($self) = @_;
+
+    croak "Service account credentials not loaded"
+      unless $self->{use_service_account} && $self->{private_key} && $self->{service_account_email};
+
+    my $now = time();
+    my $exp = $now + 3600;  # Token valid for 1 hour
+
+    # JWT Header
+    my $header = {
+        alg => "RS256",
+        typ => "JWT"
+    };
+
+    # JWT Payload (Claims)
+    my $payload = {
+        iss   => $self->{service_account_email},
+        scope => $SCOPE,
+        aud   => "https://oauth2.googleapis.com/token",
+        exp   => $exp,
+        iat   => $now
+    };
+
+    # Encode header and payload (use canonical/compact encoding)
+    my $json_encoder = JSON->new->canonical;
+    my $header_json = $json_encoder->encode($header);
+    my $payload_json = $json_encoder->encode($payload);
+
+    my $header_b64 = _base64url_encode($header_json);
+    my $payload_b64 = _base64url_encode($payload_json);
+
+    my $signing_input = "$header_b64.$payload_b64";
+
+    # Sign with RSA private key using openssl command
+    # Create temporary file for private key
+    my ($key_fh, $key_filename) = tempfile(UNLINK => 1);
+    print $key_fh $self->{private_key};
+    close $key_fh;
+
+    # Sign using openssl
+    my $signature = `echo -n "$signing_input" | openssl dgst -sha256 -sign "$key_filename" -binary`;
+    croak "OpenSSL signing failed: $!" if $?;
+
+    my $signature_b64 = _base64url_encode($signature);
+
+    # Clean up temp file
+    unlink $key_filename;
+
+    return "$signing_input.$signature_b64";
+}
+
+sub _get_service_account_token {
+    my ($self) = @_;
+
+    my $jwt = $self->_create_jwt();
+
+    my $response = $self->{ua}->post(
+        'https://oauth2.googleapis.com/token',
+        Content => [
+            grant_type => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            assertion  => $jwt
+        ]
+    );
+
+    croak "Service account token request failed: " . $response->decoded_content
+      unless $response->is_success;
+
+    my $data = $self->{json}->decode($response->decoded_content);
+
+    # Google may return either access_token or id_token depending on the request
+    # For service accounts, we can use id_token as an access token
+    return $data->{access_token} || $data->{id_token};
+}
+
 sub get_access_token {
     my ($self) = @_;
     return $self->{access_token} if $self->{access_token};
 
+    # Use service account authentication if available
+    if ($self->{use_service_account}) {
+        $self->{access_token} = $self->_get_service_account_token();
+        return $self->{access_token};
+    }
+
+    # Otherwise use OAuth2 refresh token flow
     croak "Credentials not configured. Run setup."
       unless $self->{client_id} && $self->{client_secret} && $self->{refresh_token};
 
