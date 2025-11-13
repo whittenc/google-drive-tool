@@ -1,0 +1,21 @@
+# Google Drive Credentials (sensitive files)
+.google_credentials/
+client_id.txt
+client_secret.txt
+refresh_token.txt
+folders.json
+email_notifications.json
+*.json
+
+# Perl temporary files
+*.bak
+*.tmp
+*~
+.*.swp
+
+# Output files
+out
+
+# Test files (optional - uncomment if you don't want to track)
+# test*.txt
+# *.csv
