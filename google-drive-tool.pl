@@ -5,6 +5,7 @@ use 5.010;
 
 use FindBin;
 use lib '/programs/cassens/lib';
+use lib "$FindBin::Bin/lib";
 use Google::Services;
 use Getopt::Long;
 use Pod::Usage;
