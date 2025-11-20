@@ -15,8 +15,6 @@ use Term::ReadKey;
 use Carp;
 
 sub main {
-    my $gdrive = Google::Services->new();
-
     my %opts;
     GetOptions(
         \%opts,
@@ -28,6 +26,7 @@ sub main {
         'notify',
         'overwrite',
         'convert',
+        'impersonate=s',
         'setup-credentials',
         'setup-shortcuts',
         'setup-email',
@@ -48,6 +47,11 @@ sub main {
         'debug-folders',
         'debug-token',
     ) or pod2usage(2);
+
+    # Create Google::Services object with optional impersonation
+    my %gs_args;
+    $gs_args{impersonate_user} = $opts{impersonate} if $opts{impersonate};
+    my $gdrive = Google::Services->new(%gs_args);
 
     pod2usage(1) if $opts{help};
     pod2usage( -exitval => 0, -verbose => 2 ) if $opts{man};
@@ -705,6 +709,12 @@ If a file with the same name already exists in the destination folder, its conte
 =item B<--convert>
 
 If uploading a CSV, XLS, or XLSX file, convert it to a native Google Sheet. The resulting file will have the same name, but without the file extension. When used with C<--overwrite>, it will look for an existing Google Sheet with the converted name to update.
+
+=item B<--impersonate> I<email>
+
+(Service Account only) When using service account authentication, impersonate the specified user. All operations will be performed as that user. This requires domain-wide delegation to be enabled for the service account in Google Workspace Admin Console.
+
+Example: C<--impersonate user@example.com>
 
 =back
 

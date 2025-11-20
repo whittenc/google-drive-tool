@@ -95,11 +95,39 @@ cp -r lib/ /usr/local/lib/perl5/
    - `https://www.googleapis.com/auth/drive` (file management)
    - `https://www.googleapis.com/auth/gmail.send` (notifications)
 
-### Service Account Alternative (Advanced)
-For automated/unattended usage, consider service accounts:
-- Download service account JSON key
-- Modify authentication flow in `Google::Services.pm`
-- Share target folders with service account email
+### Service Account Authentication (Automated Usage)
+For automated/unattended usage, service accounts are now fully supported:
+
+**Setup:**
+1. Place service account JSON key in one of these locations:
+   - `/data/cassens/lib/Google/.google_credentials/perl-drive-upload-56687a459f35.json`
+   - Or in the project root directory as `perl-drive-upload-56687a459f35.json`
+
+2. The tool automatically detects and uses service account authentication
+
+3. Share target folders with the service account email (e.g., `420588204332-compute@developer.gserviceaccount.com`)
+
+**User Impersonation (Domain-Wide Delegation):**
+
+To have the service account act as a specific user:
+
+1. Enable domain-wide delegation in Google Workspace Admin Console:
+   - Navigate to: Security > API Controls > Domain-wide Delegation
+   - Add the service account's Client ID
+   - Authorize these OAuth scopes:
+     - `https://www.googleapis.com/auth/drive`
+     - `https://www.googleapis.com/auth/gmail.send`
+
+2. Use the `--impersonate` flag when running commands:
+   ```bash
+   perl google-drive-tool.pl --upload --to FolderName --impersonate user@example.com file.txt
+   ```
+
+3. All operations will be performed as the impersonated user
+4. Files will appear as if that user uploaded them
+5. The impersonated user must have access to the target folders
+
+**Note:** Without domain-wide delegation, the service account will operate under its own identity and only has access to folders explicitly shared with it.
 
 ## Configuration Management
 

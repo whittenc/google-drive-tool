@@ -23,7 +23,7 @@ my $DEFAULT_CREDENTIALS_DIR = '/data/cassens/lib/Google/.google_credentials';
 my $CLIENT_ID_FILE        = "client_id.txt";
 my $CLIENT_SECRET_FILE    = "client_secret.txt";
 my $REFRESH_TOKEN_FILE    = "refresh_token.txt";
-my $SERVICE_ACCOUNT_FILE  = "perl-drive-upload-56687a459f35.json";
+my $SERVICE_ACCOUNT_FILE  = "/data/cassens/lib/Google/.google_credentials/perl-drive-upload-56687a459f35.json";
 my $FOLDERS_CONFIG_FILE   = "folders.json";
 my $EMAIL_CONFIG_FILE     = "email_notifications.json";
 my $REDIRECT_URI          = 'http://localhost:9090/oauth/callback';
@@ -35,6 +35,7 @@ sub new {
     my $self = {
         credentials_dir       => $args{credentials_dir} || $DEFAULT_CREDENTIALS_DIR,
         service_account_file  => $args{service_account_file},
+        impersonate_user      => $args{impersonate_user},
         client_id             => undef,
         client_secret         => undef,
         refresh_token         => undef,
@@ -92,32 +93,47 @@ sub _load_service_account_credentials {
     # Determine the service account file path
     my $sa_file = $self->{service_account_file};
 
-    # If not provided, look for it in the project root directory
+    # If not provided, use the default SERVICE_ACCOUNT_FILE constant
     unless ($sa_file) {
-        # Get the project root (assuming lib/Google/Services.pm structure)
-        my $module_path = abs_path(__FILE__);
-        my $project_root = dirname(dirname(dirname($module_path)));
-        $sa_file = File::Spec->catfile($project_root, $SERVICE_ACCOUNT_FILE);
+        $sa_file = $SERVICE_ACCOUNT_FILE;
     }
 
-    return unless -f $sa_file;
+    warn "DEBUG: Checking for service account file at: $sa_file\n";
+    unless (-f $sa_file) {
+        warn "DEBUG: Service account file not found\n";
+        return;
+    }
+    warn "DEBUG: Service account file found\n";
 
     # Read and parse the service account JSON
     my $content = eval { read_file($sa_file) };
-    return if $@;
+    if ($@) {
+        warn "DEBUG: Failed to read service account file: $@\n";
+        return;
+    }
 
     my $sa_data = eval { $self->{json}->decode($content) };
-    return if $@ || !$sa_data;
+    if ($@ || !$sa_data) {
+        warn "DEBUG: Failed to parse service account JSON: $@\n";
+        return;
+    }
 
     # Verify it's a service account file
-    return unless $sa_data->{type} && $sa_data->{type} eq 'service_account';
-    return unless $sa_data->{private_key} && $sa_data->{client_email};
+    unless ($sa_data->{type} && $sa_data->{type} eq 'service_account') {
+        warn "DEBUG: File is not a service account (type: " . ($sa_data->{type} // 'undefined') . ")\n";
+        return;
+    }
+    unless ($sa_data->{private_key} && $sa_data->{client_email}) {
+        warn "DEBUG: Service account file missing required fields\n";
+        return;
+    }
 
     # Store service account credentials
     $self->{service_account_email} = $sa_data->{client_email};
     $self->{private_key} = $sa_data->{private_key};
     $self->{use_service_account} = 1;
 
+    warn "DEBUG: Service account credentials loaded successfully (email: $self->{service_account_email})\n";
     return 1;
 }
 
@@ -205,6 +221,11 @@ sub _create_jwt {
         iat   => $now
     };
 
+    # Add impersonation if specified
+    if ($self->{impersonate_user}) {
+        $payload->{sub} = $self->{impersonate_user};
+    }
+
     # Encode header and payload (use canonical/compact encoding)
     my $json_encoder = JSON->new->canonical;
     my $header_json = $json_encoder->encode($header);
@@ -262,6 +283,7 @@ sub get_access_token {
 
     # Use service account authentication if available
     if ($self->{use_service_account}) {
+        warn "DEBUG: Using service account authentication (email: $self->{service_account_email})\n";
         $self->{access_token} = $self->_get_service_account_token();
         return $self->{access_token};
     }
@@ -606,10 +628,16 @@ sub get_file_info {
     return unless $file_id;
 
     my $url = "https://www.googleapis.com/drive/v3/files/$file_id?fields=$fields&supportsAllDrives=true";
+    warn "DEBUG: get_file_info - Requesting URL: $url\n";
     my $req = HTTP::Request->new( GET => $url );
     my $response = $self->_api_request($req);
 
-    return unless $response->is_success;
+    warn "DEBUG: get_file_info - Response status: " . $response->status_line . "\n";
+    unless ($response->is_success) {
+        warn "DEBUG: get_file_info - Error response body: " . $response->decoded_content . "\n";
+        return;
+    }
+    warn "DEBUG: get_file_info - Success! Response: " . $response->decoded_content . "\n";
     return $self->{json}->decode( $response->decoded_content );
 }
 
