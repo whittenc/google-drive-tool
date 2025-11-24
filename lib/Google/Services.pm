@@ -121,25 +121,43 @@ sub _load_service_account_credentials {
                   || $ENV{GOOGLE_APPLICATION_CREDENTIALS}
                   || $SERVICE_ACCOUNT_FILE;
 
+    $self->_debug("Looking for service account file at: $sa_file");
+
     unless (-f $sa_file) {
+        $self->_debug("Service account file not found");
         return;
     }
 
+    $self->_debug("Service account file found, loading...");
+
     # Read and parse the service account JSON
     my $content = eval { read_file($sa_file) };
-    return if $@;
+    if ($@) {
+        $self->_debug("Failed to read service account file: $@");
+        return;
+    }
 
     my $sa_data = eval { $self->{json}->decode($content) };
-    return if $@ || !$sa_data;
+    if ($@ || !$sa_data) {
+        $self->_debug("Failed to parse service account JSON: $@");
+        return;
+    }
 
     # Verify it's a service account file
-    return unless $sa_data->{type} && $sa_data->{type} eq 'service_account';
-    return unless $sa_data->{private_key} && $sa_data->{client_email};
+    unless ($sa_data->{type} && $sa_data->{type} eq 'service_account') {
+        $self->_debug("File is not a service account (type: " . ($sa_data->{type} || 'none') . ")");
+        return;
+    }
+    unless ($sa_data->{private_key} && $sa_data->{client_email}) {
+        $self->_debug("Service account file missing required fields");
+        return;
+    }
 
     # Store service account credentials
     $self->{service_account_email} = $sa_data->{client_email};
     $self->{private_key} = $sa_data->{private_key};
     $self->{use_service_account} = 1;
+    $self->_debug("Service account loaded successfully: $sa_data->{client_email}");
     return 1;
 }
 
