@@ -92,8 +92,8 @@ cp -r lib/ /usr/local/lib/perl5/
    - Authorized Redirect URI: `http://localhost:9090/oauth/callback`
 
 3. **Required Scopes:**
-   - `https://www.googleapis.com/auth/drive` (file management)
-   - `https://www.googleapis.com/auth/gmail.send` (notifications)
+   - `https://www.googleapis.com/auth/drive.file` (file access - limited to files created/opened by this app)
+   - Note: Gmail notifications are not available with this scope configuration
 
 ### Service Account Authentication (Automated Usage)
 For automated/unattended usage, service accounts are now fully supported:
@@ -114,9 +114,9 @@ To have the service account act as a specific user:
 1. Enable domain-wide delegation in Google Workspace Admin Console:
    - Navigate to: Security > API Controls > Domain-wide Delegation
    - Add the service account's Client ID
-   - Authorize these OAuth scopes:
-     - `https://www.googleapis.com/auth/drive`
-     - `https://www.googleapis.com/auth/gmail.send`
+   - Authorize this OAuth scope:
+     - `https://www.googleapis.com/auth/drive.file`
+   - Note: This scope only allows access to files created/opened by the app. Gmail notifications will not work.
 
 2. Use the `--impersonate` flag when running commands:
    ```bash

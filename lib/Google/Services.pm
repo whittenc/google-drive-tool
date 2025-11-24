@@ -23,11 +23,11 @@ my $DEFAULT_CREDENTIALS_DIR = '/data/cassens/lib/Google/.google_credentials';
 my $CLIENT_ID_FILE        = "client_id.txt";
 my $CLIENT_SECRET_FILE    = "client_secret.txt";
 my $REFRESH_TOKEN_FILE    = "refresh_token.txt";
-my $SERVICE_ACCOUNT_FILE  = "/data/cassens/lib/Google/.google_credentials/perl-drive-upload-56687a459f35.json";
+my $SERVICE_ACCOUNT_FILE  = "/data/cassens/lib/Google/.google_credentials/perl-drive-upload-SA.json";
 my $FOLDERS_CONFIG_FILE   = "folders.json";
 my $EMAIL_CONFIG_FILE     = "email_notifications.json";
 my $REDIRECT_URI          = 'http://localhost:9090/oauth/callback';
-my $SCOPE                 = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.send';
+my $SCOPE                 = 'https://www.googleapis.com/auth/drive.file';
 
 sub new {
     my ( $class, %args ) = @_;
@@ -36,6 +36,7 @@ sub new {
         credentials_dir       => $args{credentials_dir} || $DEFAULT_CREDENTIALS_DIR,
         service_account_file  => $args{service_account_file},
         impersonate_user      => $args{impersonate_user},
+        debug                 => $args{debug} || 0,
         client_id             => undef,
         client_secret         => undef,
         refresh_token         => undef,
@@ -61,6 +62,11 @@ sub new {
     return $self;
 }
 
+
+sub _debug {
+    my ($self, $message) = @_;
+    warn "DEBUG: $message\n" if $self->{debug};
+}
 
 sub _get_config_path {
     my ( $self, $filename ) = @_;
@@ -98,42 +104,25 @@ sub _load_service_account_credentials {
         $sa_file = $SERVICE_ACCOUNT_FILE;
     }
 
-    warn "DEBUG: Checking for service account file at: $sa_file\n";
     unless (-f $sa_file) {
-        warn "DEBUG: Service account file not found\n";
         return;
     }
-    warn "DEBUG: Service account file found\n";
 
     # Read and parse the service account JSON
     my $content = eval { read_file($sa_file) };
-    if ($@) {
-        warn "DEBUG: Failed to read service account file: $@\n";
-        return;
-    }
+    return if $@;
 
     my $sa_data = eval { $self->{json}->decode($content) };
-    if ($@ || !$sa_data) {
-        warn "DEBUG: Failed to parse service account JSON: $@\n";
-        return;
-    }
+    return if $@ || !$sa_data;
 
     # Verify it's a service account file
-    unless ($sa_data->{type} && $sa_data->{type} eq 'service_account') {
-        warn "DEBUG: File is not a service account (type: " . ($sa_data->{type} // 'undefined') . ")\n";
-        return;
-    }
-    unless ($sa_data->{private_key} && $sa_data->{client_email}) {
-        warn "DEBUG: Service account file missing required fields\n";
-        return;
-    }
+    return unless $sa_data->{type} && $sa_data->{type} eq 'service_account';
+    return unless $sa_data->{private_key} && $sa_data->{client_email};
 
     # Store service account credentials
     $self->{service_account_email} = $sa_data->{client_email};
     $self->{private_key} = $sa_data->{private_key};
     $self->{use_service_account} = 1;
-
-    warn "DEBUG: Service account credentials loaded successfully (email: $self->{service_account_email})\n";
     return 1;
 }
 
@@ -283,7 +272,6 @@ sub get_access_token {
 
     # Use service account authentication if available
     if ($self->{use_service_account}) {
-        warn "DEBUG: Using service account authentication (email: $self->{service_account_email})\n";
         $self->{access_token} = $self->_get_service_account_token();
         return $self->{access_token};
     }
@@ -628,16 +616,10 @@ sub get_file_info {
     return unless $file_id;
 
     my $url = "https://www.googleapis.com/drive/v3/files/$file_id?fields=$fields&supportsAllDrives=true";
-    warn "DEBUG: get_file_info - Requesting URL: $url\n";
     my $req = HTTP::Request->new( GET => $url );
     my $response = $self->_api_request($req);
 
-    warn "DEBUG: get_file_info - Response status: " . $response->status_line . "\n";
-    unless ($response->is_success) {
-        warn "DEBUG: get_file_info - Error response body: " . $response->decoded_content . "\n";
-        return;
-    }
-    warn "DEBUG: get_file_info - Success! Response: " . $response->decoded_content . "\n";
+    return unless $response->is_success;
     return $self->{json}->decode( $response->decoded_content );
 }
 

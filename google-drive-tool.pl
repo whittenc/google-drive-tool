@@ -27,6 +27,7 @@ sub main {
         'overwrite',
         'convert',
         'impersonate=s',
+        'debug',
         'setup-credentials',
         'setup-shortcuts',
         'setup-email',
@@ -48,9 +49,10 @@ sub main {
         'debug-token',
     ) or pod2usage(2);
 
-    # Create Google::Services object with optional impersonation
+    # Create Google::Services object with optional impersonation and debug flag
     my %gs_args;
     $gs_args{impersonate_user} = $opts{impersonate} if $opts{impersonate};
+    $gs_args{debug} = $opts{debug} if $opts{debug};
     my $gdrive = Google::Services->new(%gs_args);
 
     pod2usage(1) if $opts{help};
@@ -523,13 +525,14 @@ sub cmd_upload {
 
     croak "Could not resolve destination folder." unless $folder_id;
     my $folder_info = $gdrive->get_file_info($folder_id, 'name');
+    my $folder_name = $folder_info->{name} // $folder_id;
 
     my $action_verb = $overwrite ? "Uploading (with overwrite)" : "Uploading";
     my ($ext) = $file_path =~ /\.([^.]+)$/;
     if ($convert && lc($ext//'') =~ /^(csv|xls|xlsx)$/i) {
-        say "$action_verb and converting '$file_path' to a Google Sheet in '$folder_info->{name}'...";
+        say "$action_verb and converting '$file_path' to a Google Sheet in '$folder_name'...";
     } else {
-        say "$action_verb '$file_path' to '$folder_info->{name}'...";
+        say "$action_verb '$file_path' to '$folder_name'...";
     }
 
     my $uploaded_file;
