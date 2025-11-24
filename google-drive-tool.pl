@@ -28,6 +28,7 @@ sub main {
         'convert',
         'impersonate=s',
         'debug',
+        'service-account-file=s',
         'setup-credentials',
         'setup-shortcuts',
         'setup-email',
@@ -49,10 +50,11 @@ sub main {
         'debug-token',
     ) or pod2usage(2);
 
-    # Create Google::Services object with optional impersonation and debug flag
+    # Create Google::Services object with optional parameters
     my %gs_args;
     $gs_args{impersonate_user} = $opts{impersonate} if $opts{impersonate};
     $gs_args{debug} = $opts{debug} if $opts{debug};
+    $gs_args{service_account_file} = $opts{'service-account-file'} if $opts{'service-account-file'};
     my $gdrive = Google::Services->new(%gs_args);
 
     pod2usage(1) if $opts{help};
@@ -550,7 +552,11 @@ sub cmd_upload {
     say "  View URL: https://drive.google.com/file/d/$uploaded_file->{id}/view";
 
     if ($notify) {
-        cmd_send_notification($gdrive, $uploaded_file, $folder_id);
+        unless ($gdrive->can_send_notifications()) {
+            say "\nWarning: Email notifications require 'gmail.send' scope. Notification will be skipped.";
+        } else {
+            cmd_send_notification($gdrive, $uploaded_file, $folder_id);
+        }
     }
 }
 
@@ -614,6 +620,8 @@ gdrive-tool.pl <command> [options]
 =head1 DESCRIPTION
 
 This script provides a comprehensive command-line interface for interacting with Google Drive. It can upload files, manage folder shortcuts, and send email notifications.
+
+B<Authentication:> The tool supports both OAuth2 (for individual users) and service account authentication (for automated/unattended usage). Service accounts can impersonate users when domain-wide delegation is configured in Google Workspace.
 
 =head1 COMMANDS
 
@@ -683,6 +691,10 @@ Runs diagnostic queries to list shared and owned folders.
 
 Checks the validity and scopes of your current access token.
 
+=item B<--debug>
+
+Enables verbose debug output showing API requests, responses, and authentication details. Useful for troubleshooting authentication and permission issues.
+
 =item B<--help|?>, B<--man>
 
 Shows help and documentation.
@@ -719,6 +731,12 @@ If uploading a CSV, XLS, or XLSX file, convert it to a native Google Sheet. The 
 
 Example: C<--impersonate user@example.com>
 
+=item B<--service-account-file> I<path>
+
+Specifies the path to a service account JSON key file. If not provided, the tool will check the GOOGLE_APPLICATION_CREDENTIALS environment variable, then fall back to the default location. Service account authentication is used for automated/unattended usage.
+
+Example: C<--service-account-file /path/to/service-account.json>
+
 =back
 
 =head1 EXAMPLES
@@ -754,6 +772,14 @@ Example: C<--impersonate user@example.com>
 =item Upload and convert a spreadsheet with a custom name:
 
   gdrive-tool.pl --upload --to reports --convert --name "Q1 Sales Report" sales.xlsx
+
+=item Upload as an impersonated user (service account with domain-wide delegation):
+
+  gdrive-tool.pl --upload --to reports --impersonate user@example.com monthly.csv
+
+=item Enable debug output for troubleshooting:
+
+  gdrive-tool.pl --upload --to reports --debug monthly.csv
 
 =item List your shortcuts:
 

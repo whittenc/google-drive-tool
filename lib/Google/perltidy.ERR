@@ -1,0 +1,10 @@
+Perltidy version is 20210111
+
+<stdin>: Begin Error Output Stream
+1: 
+1: Partial match to quote modifier [msixpodualngc] at word: 'cassens'
+1: Please put a space between quote modifiers and trailing keywords.
+
+1: /data/cassens/lib/Google/.google_credentials
+                           -^
+found . where term expected (previous token underlined)

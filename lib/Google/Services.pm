@@ -27,16 +27,28 @@ my $SERVICE_ACCOUNT_FILE  = "/data/cassens/lib/Google/.google_credentials/perl-d
 my $FOLDERS_CONFIG_FILE   = "folders.json";
 my $EMAIL_CONFIG_FILE     = "email_notifications.json";
 my $REDIRECT_URI          = 'http://localhost:9090/oauth/callback';
+# SCOPE can be overridden via constructor, environment variable, or defaults to drive.file
 my $SCOPE                 = 'https://www.googleapis.com/auth/drive.file';
 
 sub new {
     my ( $class, %args ) = @_;
+
+    # Validate impersonation email format if provided
+    if ($args{impersonate_user}) {
+        unless ($args{impersonate_user} =~ /^[^\s@]+@[^\s@]+\.[^\s@]+$/) {
+            croak "Invalid impersonation email format: $args{impersonate_user}";
+        }
+    }
+
+    # Allow scope override via constructor parameter or environment variable
+    my $scope = $args{scope} || $ENV{GOOGLE_DRIVE_SCOPE} || $SCOPE;
 
     my $self = {
         credentials_dir       => $args{credentials_dir} || $DEFAULT_CREDENTIALS_DIR,
         service_account_file  => $args{service_account_file},
         impersonate_user      => $args{impersonate_user},
         debug                 => $args{debug} || 0,
+        scope                 => $scope,
         client_id             => undef,
         client_secret         => undef,
         refresh_token         => undef,
@@ -52,6 +64,11 @@ sub new {
     bless $self, $class;
 
     mkdir $self->{credentials_dir} unless -d $self->{credentials_dir};
+
+    # Debug output for impersonation settings
+    if ($self->{debug} && $self->{impersonate_user}) {
+        warn "DEBUG: Impersonation configured for: $self->{impersonate_user}\n";
+    }
 
     # Try to load service account credentials first
     $self->_load_service_account_credentials();
@@ -96,13 +113,13 @@ sub _load_credentials {
 sub _load_service_account_credentials {
     my ($self) = @_;
 
-    # Determine the service account file path
-    my $sa_file = $self->{service_account_file};
-
-    # If not provided, use the default SERVICE_ACCOUNT_FILE constant
-    unless ($sa_file) {
-        $sa_file = $SERVICE_ACCOUNT_FILE;
-    }
+    # Determine the service account file path in order of priority:
+    # 1. Explicit parameter passed to constructor
+    # 2. Environment variable GOOGLE_APPLICATION_CREDENTIALS
+    # 3. Default SERVICE_ACCOUNT_FILE constant
+    my $sa_file = $self->{service_account_file}
+                  || $ENV{GOOGLE_APPLICATION_CREDENTIALS}
+                  || $SERVICE_ACCOUNT_FILE;
 
     unless (-f $sa_file) {
         return;
@@ -126,24 +143,51 @@ sub _load_service_account_credentials {
     return 1;
 }
 
+sub _ensure_valid_token {
+    my ($self) = @_;
+    $self->get_access_token() unless $self->{access_token};
+    return $self->{access_token};
+}
+
+sub _handle_api_error {
+    my ($self, $response) = @_;
+
+    # Add scope-aware error message for 404 errors
+    if ( $response->code == 404 && $self->{scope} =~ /drive\.file$/ ) {
+        $self->_debug("Note: With 'drive.file' scope, only files/folders created by this tool are accessible.");
+    }
+
+    return;
+}
+
+sub _retry_request {
+    my ($self, $request) = @_;
+
+    # Force token refresh
+    $self->{access_token} = undef;
+    $self->get_access_token();
+
+    # Retry request with new token
+    $request->header( Authorization => "Bearer " . $self->{access_token} );
+    return $self->{ua}->request($request);
+}
+
 sub _api_request {
     my ( $self, $request ) = @_;
 
     # Ensure we have an access token
-    $self->get_access_token() unless $self->{access_token};
+    $self->_ensure_valid_token();
     $request->header( Authorization => "Bearer " . $self->{access_token} );
 
     my $response = $self->{ua}->request($request);
 
     # Simple token refresh logic on 401 Unauthorized
     if ( $response->code == 401 ) {
-        $self->{access_token} = undef;    # Force refresh
-        $self->get_access_token();
-
-        # Retry request with new token
-        $request->header( Authorization => "Bearer " . $self->{access_token} );
-        $response = $self->{ua}->request($request);
+        $response = $self->_retry_request($request);
     }
+
+    # Handle API errors
+    $self->_handle_api_error($response);
 
     return $response;
 }
@@ -204,7 +248,7 @@ sub _create_jwt {
     # JWT Payload (Claims)
     my $payload = {
         iss   => $self->{service_account_email},
-        scope => $SCOPE,
+        scope => $self->{scope},
         aud   => "https://oauth2.googleapis.com/token",
         exp   => $exp,
         iat   => $now
@@ -212,7 +256,18 @@ sub _create_jwt {
 
     # Add impersonation if specified
     if ($self->{impersonate_user}) {
+        $self->_debug("Impersonating user: $self->{impersonate_user}");
         $payload->{sub} = $self->{impersonate_user};
+    } else {
+        $self->_debug("No impersonation - using service account identity");
+    }
+
+    # Debug JWT payload
+    if ($self->{debug}) {
+        $self->_debug("JWT Claims:");
+        $self->_debug("  iss (issuer): $payload->{iss}");
+        $self->_debug("  scope: $payload->{scope}");
+        $self->_debug("  sub (impersonate): " . ($payload->{sub} || 'none'));
     }
 
     # Encode header and payload (use canonical/compact encoding)
@@ -226,14 +281,18 @@ sub _create_jwt {
     my $signing_input = "$header_b64.$payload_b64";
 
     # Sign with RSA private key using openssl command
-    # Create temporary file for private key
+    # Create temporary file for private key with secure permissions
     my ($key_fh, $key_filename) = tempfile(UNLINK => 1);
+    chmod 0600, $key_filename;  # Secure the temp file before writing
     print $key_fh $self->{private_key};
     close $key_fh;
 
     # Sign using openssl
-    my $signature = `echo -n "$signing_input" | openssl dgst -sha256 -sign "$key_filename" -binary`;
-    croak "OpenSSL signing failed: $!" if $?;
+    my $signature = `echo -n "$signing_input" | openssl dgst -sha256 -sign "$key_filename" -binary 2>&1`;
+    my $exit_code = $?;
+    if ($exit_code != 0) {
+        croak "Failed to sign JWT with OpenSSL (exit code: $exit_code): $signature";
+    }
 
     my $signature_b64 = _base64url_encode($signature);
 
@@ -266,12 +325,28 @@ sub _get_service_account_token {
     return $data->{access_token} || $data->{id_token};
 }
 
+sub can_send_notifications {
+    my ($self) = @_;
+    return $self->{scope} =~ /gmail\.send/;
+}
+
 sub get_access_token {
     my ($self) = @_;
+
+    # Debug output for token requests
+    if ($self->{debug}) {
+        if ($self->{access_token}) {
+            $self->_debug("Using cached access token");
+        } else {
+            $self->_debug("Requesting new access token");
+        }
+    }
+
     return $self->{access_token} if $self->{access_token};
 
     # Use service account authentication if available
     if ($self->{use_service_account}) {
+        $self->_debug("Using service account authentication");
         $self->{access_token} = $self->_get_service_account_token();
         return $self->{access_token};
     }
@@ -317,7 +392,7 @@ sub generate_auth_url {
         "https://accounts.google.com/o/oauth2/v2/auth?"
       . "client_id=" . uri_escape( $self->{client_id} )
       . "&redirect_uri=" . uri_escape($REDIRECT_URI)
-      . "&scope=" . uri_escape($SCOPE)
+      . "&scope=" . uri_escape($self->{scope})
       . "&response_type=code"
       . "&access_type=offline"
       . "&prompt=consent";
